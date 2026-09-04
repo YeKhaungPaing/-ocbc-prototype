@@ -849,60 +849,32 @@ async function callClaude(system, user){
 
 /* ---------------- Botpress bridge ----------------
    Wires this panel to the REAL, published Botpress bot (with your uploaded
-   Knowledge Base + Instructions) via the official Webchat JS API, instead of
-   calling Claude directly. See the <script src="...inject.js"> tags near the
-   end of this file — those are what make window.botpress exist. */
-let bpReadyPromise = null;
-
-function ensureBotpressReady(){
-  if(bpReadyPromise) return bpReadyPromise;
-  bpReadyPromise = new Promise((resolve, reject)=>{
-    if(!window.botpress){
-      reject(new Error('Botpress widget not loaded (check the embed script tags)'));
-      return;
-    }
-    let settled = false;
-    window.botpress.on('webchat:ready', ()=>{
-      if(settled) return;
-      settled = true;
-      window.botpress.close(); // hide the floating bubble again — we only needed it to initialise
-      resolve();
-    });
-    window.botpress.open(); // triggers init + the 'webchat:ready' event above
-    setTimeout(()=>{ if(!settled){ settled = true; resolve(); } }, 4000); // don't hang forever if the event never fires
+   Knowledge Base + Instructions). Rather than secretly listening for the
+   bot's reply and relaying it (unreliable — timing/event-name quirks
+   between Botpress versions made this fail silently), this opens the real
+   widget and sends the question straight into it. The answer then shows up
+   in Botpress's own chat window, which is proven to work reliably. */
+function waitForBotpress(timeoutMs){
+  return new Promise((resolve, reject)=>{
+    const start = Date.now();
+    (function poll(){
+      if(window.botpress && typeof window.botpress.open === 'function' && typeof window.botpress.sendMessage === 'function'){
+        resolve();
+        return;
+      }
+      if(Date.now() - start > timeoutMs){
+        reject(new Error('Botpress widget not loaded (check the embed script tags near the end of this file)'));
+        return;
+      }
+      setTimeout(poll, 150);
+    })();
   });
-  return bpReadyPromise;
 }
 
-async function askBotpress(question){
-  await ensureBotpressReady();
-  return new Promise((resolve, reject)=>{
-    let done = false;
-    const timeoutId = setTimeout(()=>{
-      if(done) return;
-      done = true;
-      reject(new Error('Botpress did not reply in time'));
-    }, 15000);
-
-    const handler = (message)=>{
-      if(done) return;
-      const text = (message && message.payload && message.payload.text)
-        || (message && message.text)
-        || (typeof message === 'string' ? message : '');
-      if(!text) return; // ignore non-text events (typing indicators, etc.)
-      done = true;
-      clearTimeout(timeoutId);
-      resolve(text);
-    };
-
-    window.botpress.on('message', handler);
-    Promise.resolve(window.botpress.sendMessage(question)).catch(err=>{
-      if(done) return;
-      done = true;
-      clearTimeout(timeoutId);
-      reject(err);
-    });
-  });
+async function sendToBotpress(question){
+  await waitForBotpress(6000); // the widget script needs a moment after page load to fully initialise
+  window.botpress.open();
+  window.botpress.sendMessage(question);
 }
 
 async function sendChat(){
@@ -927,18 +899,19 @@ async function sendChat(){
     logMesh('BEACON', route, `Routing question: "${question.slice(0,48)}${question.length>48?'…':''}"`);
   }
 
+  const match = matchKB(question); // used only to drive the local "self-updating KB" visual below
+  let ok = true;
+  let answerText = '';
+
   const typing = document.createElement('div');
   typing.className = 'typing';
-  typing.innerHTML = 'BEACON is checking with Botpress <span class="dots"><span></span><span></span><span></span></span>';
+  typing.innerHTML = 'Connecting to Botpress <span class="dots"><span></span><span></span><span></span></span>';
   document.getElementById('chatWindow').appendChild(typing);
   document.getElementById('chatWindow').scrollTop = 999999;
 
-  const match = matchKB(question); // used only to drive the local "self-updating KB" visual below
-  let answerText = '';
-  let ok = true;
-
   try{
-    answerText = await askBotpress(question); // <-- real, published Botpress bot + your uploaded Knowledge Base
+    await sendToBotpress(question); // opens the real Botpress widget and sends the question into it
+    answerText = "I've sent that to my live chat, powered by Botpress — check the chat window that just opened in the bottom-right corner for the real answer.";
   } catch(err){
     ok = false;
     answerText = match
